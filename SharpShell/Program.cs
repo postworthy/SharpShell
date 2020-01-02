@@ -156,6 +156,7 @@ namespace SharpShell
                                         if (psi.Streams.Error.Count > 0)
                                         {
                                             psi.Streams.Error.ToList().ForEach(x => { streamWriter.WriteLine($"{x.ToString()}"); });
+                                            psi.Streams.Error.Clear();
                                         }
 
                                     }
